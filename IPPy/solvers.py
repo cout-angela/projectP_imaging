@@ -1,27 +1,7 @@
 import math
 import time
-import warnings
 
-try:
-    import numba as nb
-except ImportError:
-    class _NumbaShim:
-        @staticmethod
-        def njit(*args, **kwargs):
-            if args and callable(args[0]) and len(args) == 1 and not kwargs:
-                return args[0]
-
-            def decorator(func):
-                return func
-
-            return decorator
-
-    nb = _NumbaShim()
-    warnings.warn(
-        "numba is not installed. IPPy solvers will run without JIT acceleration.",
-        RuntimeWarning,
-    )
-
+import numba as nb
 import numpy as np
 import torch
 
@@ -199,7 +179,7 @@ class ChambollePockTpVConstrained:
 
             # Update w
             x_grad = self.grad(xx)
-            ww = w + sigma * x_grad
+            ww = w + sigma * nu * x_grad
 
             abs_ww = torch.square(ww[:, 0:1]) + torch.square(ww[:, 1:2])
             abs_ww = torch.cat((abs_ww, abs_ww), dim=1)
@@ -338,6 +318,8 @@ class ChambollePockTpVUnconstrained:
         starting_point: torch.Tensor | None = None,
         eta: float = 2e-3,
         maxiter: int = 100,
+        tolf: float = 1e-6,
+        tolx: float = 1e-6,
         p: int = 1,
         verbose: bool = False,
         *args,
@@ -396,7 +378,7 @@ class ChambollePockTpVUnconstrained:
         con = True
         while con and (k < maxiter):
             # Update y
-            y = (y + sigma * (self.K(xx) - y_delta)) / (1 + lmbda * sigma)
+            y = (y + sigma * (self.K(xx) - y_delta)) / (1 + sigma)
 
             # Compute the magnitude of the gradient
             grad_x = self.grad(xx)
@@ -410,7 +392,7 @@ class ChambollePockTpVUnconstrained:
             x_grad = self.grad(xx)
             ww = w + sigma * x_grad
 
-            abs_ww = torch.square(ww[:, 0:1]) + torch.square(ww[:, 1:2])
+            abs_ww = torch.sqrt(torch.square(ww[:, 0:1]) + torch.square(ww[:, 1:2]))
             abs_ww = torch.cat((abs_ww, abs_ww), dim=1)
 
             lmbda_vec_over_nu = lmbda * WW / nu
@@ -450,13 +432,15 @@ class ChambollePockTpVUnconstrained:
             info["obj"][k] = 0.5 * res + lmbda * ftpv
 
             # Stopping criteria
-            c = math.sqrt(res) / (torch.max(y_delta) * math.sqrt(self.mx * self.my))
+            norm_res = math.sqrt(res) / (
+                torch.max(y_delta) * math.sqrt(self.mx * self.my) + 1e-8
+            )
             d_abs = torch.norm(x.flatten() - xtmp.flatten())
 
-            if (c >= 9e-6) and (c <= 1.1e-5):
+            if norm_res <= tolf:
                 con = False
 
-            if d_abs < 1e-3 * (1 + torch.norm(xtmp.flatten())):
+            if d_abs < tolx * (1e-6 + torch.norm(xtmp.flatten())):
                 con = False
 
             # Update k
@@ -544,90 +528,115 @@ class CGLS:
         maxiter: int = 100,
         tolf: float = 1e-6,
         tolx: float = 1e-6,
+        lam: float = 0.0,
         verbose: bool = False,
         *args,
         **kwargs,
     ):
-        # Initialization
-        if starting_point is None or starting_point == [None]:
-            x = torch.zeros((1, 1, self.nx, self.ny))
-        else:
-            x = starting_point
-        d = y_delta
-        r0 = self.K.T(y_delta)
-        p = r0
-        t = self.K(p)
-        r = r0
-        k = 0
+        if lam < 0:
+            raise ValueError("lam must be non-negative.")
 
-        # Initialize infos
+        if starting_point is None:
+            x = torch.zeros(
+                (1, 1, self.nx, self.ny),
+                dtype=y_delta.dtype,
+                device=y_delta.device,
+            )
+        else:
+            x = starting_point.clone()
+
+        # b = K^T y
+        b = self.K.T(y_delta)
+
+        # r = b - (K^T K + lam I)x
+        Ax = self.K.T(self.K(x)) + lam * x
+        r = b - Ax
+        p = r.clone()
+
         info = dict()
-        info["residues"] = torch.zeros((maxiter + 1, 1))
-        info["RE"] = torch.zeros((maxiter + 1, 1))
-        info["RMSE"] = torch.zeros((maxiter + 1, 1))
-        info["PSNR"] = torch.zeros((maxiter + 1, 1))
-        info["SSIM"] = torch.zeros((maxiter + 1, 1))
+        info["residues"] = torch.zeros(
+            (maxiter + 1, 1), dtype=y_delta.dtype, device=y_delta.device
+        )
+        info["RE"] = torch.zeros(
+            (maxiter + 1, 1), dtype=y_delta.dtype, device=y_delta.device
+        )
+        info["RMSE"] = torch.zeros(
+            (maxiter + 1, 1), dtype=y_delta.dtype, device=y_delta.device
+        )
+        info["PSNR"] = torch.zeros(
+            (maxiter + 1, 1), dtype=y_delta.dtype, device=y_delta.device
+        )
+        info["SSIM"] = torch.zeros(
+            (maxiter + 1, 1), dtype=y_delta.dtype, device=y_delta.device
+        )
         info["iterations"] = 0
 
-        # Stopping condition
+        k = 0
         start_time = time.time()
-        con = True
-        while con and (k < maxiter):
-            x0 = x
+        while k < maxiter:
+            x0 = x.clone()
 
-            # Update cycle
-            alpha = torch.norm(r0.flatten()) ** 2 / torch.norm(t.flatten()) ** 2
-            x = x0 + alpha * p
-            d = d - alpha * t
-            r = self.K.T(d)
-            beta = torch.norm(r.flatten()) ** 2 / torch.norm(r0.flatten()) ** 2
-            p = r + beta * p
-            t = self.K(p)
-            r0 = r
+            rr = torch.sum(r * r)
 
-            # Compute relative error
+            Ap = self.K.T(self.K(p)) + lam * p
+            pAp = torch.sum(p * Ap)
+
+            alpha = rr / pAp
+            x = x + alpha * p
+            r_new = r - alpha * Ap
+
+            info["residues"][k] = torch.norm(r_new.flatten()) ** 2
+
             if x_true is not None:
                 info["RE"][k] = metrics.RE(x, x_true)
                 info["PSNR"][k] = metrics.PSNR(x, x_true)
                 info["RMSE"][k] = metrics.RMSE(x, x_true)
                 info["SSIM"][k] = metrics.SSIM(x, x_true)
 
-            # Save the values into info
-            info["residues"][k] = torch.norm(r.flatten()) ** 2
-
-            # Stopping criteria
-            d_abs = torch.norm(x.flatten() - x0.flatten())
-
+            d_abs = torch.norm((x - x0).flatten())
             if d_abs < tolx * (1 + torch.norm(x0.flatten())):
-                con = False
+                k += 1
+                r = r_new
+                break
 
-            if torch.norm(r.flatten()) < tolf:
-                con = False
+            if torch.norm(r_new.flatten()) < tolf:
+                k += 1
+                r = r_new
+                break
 
-            # Update k
-            k = k + 1
+            rr_new = torch.sum(r_new * r_new)
+
+            beta = rr_new / rr
+            p = r_new + beta * p
+            r = r_new
+
+            k += 1
+
             if verbose:
-                # Measure time
                 total_time = time.time() - start_time
-
-                # Convert elapsed time to hours, minutes, and seconds
                 hours, rem = divmod(total_time, 3600)
                 minutes, seconds = divmod(rem, 60)
-
-                # Format using an f-string with %H:%M:%S style
                 formatted_time = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
 
-                print(
-                    f"({formatted_time}) Iteration {k}/{maxiter} -> RE: {info['RE'][k-1, 0]:0.4f}, SSIM: {info['SSIM'][k-1, 0]:0.4f}."
-                )
+                if x_true is not None:
+                    print(
+                        f"({formatted_time}) Iteration {k}/{maxiter} -> "
+                        f"RE: {info['RE'][k-1, 0]:0.4f}, "
+                        f"SSIM: {info['SSIM'][k-1, 0]:0.4f}."
+                    )
+                else:
+                    print(
+                        f"({formatted_time}) Iteration {k}/{maxiter} -> "
+                        f"residual: {info['residues'][k-1, 0]:0.4e}."
+                    )
 
-        # Save number of iterations in info and truncate
         info["residues"] = info["residues"][:k]
         info["RE"] = info["RE"][:k]
         info["RMSE"] = info["RMSE"][:k]
         info["PSNR"] = info["PSNR"][:k]
         info["SSIM"] = info["SSIM"][:k]
         info["iterations"] = k
+
         return x, info
 
 

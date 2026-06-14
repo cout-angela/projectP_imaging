@@ -1,6 +1,7 @@
-from . import operators, solvers
+from . import solvers
+
 from .nn import models
-from .utilities import metrics, data
+from .utilities import metrics
 
 # List which algorithms are neural networks and which are variational solvers
 direct = {

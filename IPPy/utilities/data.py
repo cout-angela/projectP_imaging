@@ -5,21 +5,12 @@ import os
 import warnings
 
 from torch.utils.data import Dataset
-import torch.nn.functional as F
+from torchvision.transforms import Resize
 
 from ._utilities import *
 
 # Disable warnings
 warnings.filterwarnings("ignore")
-
-
-def _resize_tensor(img: torch.Tensor, data_shape: int) -> torch.Tensor:
-    return F.interpolate(
-        img.float(),
-        size=(data_shape, data_shape),
-        mode="bilinear",
-        align_corners=False,
-    )
 
 
 class ImageDataset(Dataset):
@@ -47,12 +38,12 @@ class ImageDataset(Dataset):
         if isinstance(index, int):
             img = load_image(self.img_name_list[index])
         elif isinstance(index, slice):
-            start = index.start or 0
-            imgs = [load_image(self.img_name_list[i]) for i in range(start, index.stop)]
-            img = torch.cat(imgs, dim=0)
+            img = load_image(self.img_name_list[0])
+            for i in range(index.start + 1, index.stop):
+                img = torch.cat((img, load_image(self.img_name_list[i])), dim=0)
 
         if self.data_shape is not None:
-            img = _resize_tensor(img, self.data_shape)
+            img = Resize(self.data_shape)(img)
 
         return img, self.get_name(index)
 
@@ -97,12 +88,14 @@ class TrainDataset(Dataset):
             x = load_image(self.in_name_list[index])[0]
             y = load_image(self.out_name_list[index])[0]
         elif isinstance(index, slice):
-            start = index.start or 0
-            x = torch.cat([load_image(self.in_name_list[i]) for i in range(start, index.stop)], dim=0)
-            y = torch.cat([load_image(self.out_name_list[i]) for i in range(start, index.stop)], dim=0)
+            x = load_image(self.in_name_list[0])
+            y = load_image(self.out_name_list[0])
+            for i in range(index.start + 1, index.stop):
+                x = torch.cat((x, load_image(self.in_name_list[i])), dim=0)
+                y = torch.cat((y, load_image(self.out_name_list[i])), dim=0)
 
         if self.data_shape is not None:
-            x = _resize_tensor(x, self.data_shape)
-            y = _resize_tensor(y, self.data_shape)
+            x = Resize(self.data_shape)(x)
+            y = Resize(self.data_shape)(y)
 
         return x, y

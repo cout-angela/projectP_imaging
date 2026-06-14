@@ -5,11 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from PIL import Image
-
-try:
-    from torchvision.transforms.functional import to_pil_image
-except ImportError:
-    to_pil_image = None
+from torchvision.transforms.functional import to_pil_image
 
 
 def create_path_if_not_exists(path: str) -> None:
@@ -66,46 +62,21 @@ def save_image(x: torch.Tensor, save_path: str) -> None:
     :param str save_path: the path to which x has to be saved.
     """
     # Convert to PIL Image
-    if to_pil_image is not None:
-        x = to_pil_image(x[0, 0])
-    else:
-        x = x[0, 0].detach().cpu().clamp(0, 1)
-        x = Image.fromarray((255 * x).round().to(torch.uint8).numpy(), mode="L")
+    x = to_pil_image(x[0, 0])
 
     # Save
     x.save(save_path)
 
 
-def gaussian_noise(y: torch.Tensor, noise_level: float) -> torch.Tensor:
+def gaussian_noise(y: torch.Tensor, noise_level: str) -> torch.Tensor:
     r"""
-    Returns a data-dependent sample of Gaussian noise "e", with norm equal to
-    ``||e|| = noise_level * ||y||``.
+    Returns a data-dependent sample of gaussian noise "e", with norm equal ||e|| = noise_level * || y ||.
 
-    :param torch.Tensor y: The clean measurements y = Kx.
-    :param float noise_level: Relative noise level (e.g. 0.01 for 1%).
+    :param torch.Tensor y: The corrupted data y = Kx.
+    :param str noise_level: The noise level.
     """
     e = torch.randn_like(y, device=y.device)
     return e / torch.norm(e) * torch.norm(y) * noise_level
-
-
-def poisson_noise(y: torch.Tensor, peak: float = 100.0) -> torch.Tensor:
-    r"""
-    Returns a Poisson-corrupted version of y.
-
-    The tensor y is scaled so that its maximum equals ``peak`` (interpreted as
-    the expected photon count at the brightest pixel), then Poisson noise is
-    sampled and the result is rescaled back to the original range.
-
-    :param torch.Tensor y: The clean measurements y = Kx (non-negative).
-    :param float peak: Expected photon count at maximum intensity. Higher values
-                       give less noise. Default: 100.
-    """
-    y_max = y.max()
-    if y_max <= 0:
-        return y.clone()
-    y_scaled = y / y_max * peak
-    noisy = torch.poisson(y_scaled.clamp(min=0))
-    return noisy / peak * y_max
 
 
 def show(

@@ -61,6 +61,7 @@ class UNet(nn.Module):
         self.final_activation = final_activation
 
         # Define blocks
+        self.skip_connections = []
         self.preprocess = ConvBlock(ch_in, middle_ch[0])
 
         # ---- ENCODER ----
@@ -100,22 +101,20 @@ class UNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        skip_connections = []
-
         # Preprocess
         h = self.preprocess(x)
 
         # Downpath
         for l in range(len(self.encoder_layers)):
             h, skip = self.encoder_layers[l](h)
-            skip_connections.append(skip)
+            self.skip_connections.append(skip)
 
         # Bottleneck
         h = self.bottleneck(h)
 
         # Uppath
         for l in range(len(self.decoder_layers)):
-            skip = skip_connections.pop()  # Retrieve last skip connection
+            skip = self.skip_connections.pop()  # Retrieve last skip connection
             h = self.decoder_layers[l](h, skip)
 
         if self.final_activation is not None:

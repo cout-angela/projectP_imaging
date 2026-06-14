@@ -45,8 +45,8 @@ def train(
     print(f"Training NN model for {n_epochs} epochs and batch size of {batch_size}.")
 
     # Cycle over the epochs
-    loss_history = []
-    ssim_history = []
+    loss_total = torch.zeros((n_epochs,))
+    ssim_total = torch.zeros((n_epochs,))
     for epoch in range(n_epochs):
 
         # Cycle over the batches
@@ -84,10 +84,8 @@ def train(
             )
 
         # Update the history
-        avg_loss = epoch_loss / (t + 1)
-        avg_ssim = ssim_loss / (t + 1)
-        loss_history.append(avg_loss)
-        ssim_history.append(avg_ssim)
+        loss_total[epoch] = epoch_loss / (t + 1)
+        ssim_total[epoch] = ssim_loss / (t + 1)
 
         # Save the weights of the model
         if save_each is not None and (epoch + 1) % save_each == 0:
@@ -96,7 +94,6 @@ def train(
                 weights_path,
             )
     print()
-    return {"loss": loss_history, "ssim": ssim_history}
 
 
 def save(model: nn.Module, weights_path: str):
@@ -132,5 +129,5 @@ def load(weights_path: str):
     model = models.UNet(**model_config)
 
     # Load model weights
-    model.load_state_dict(torch.load(f"{weights_path}/weights.pth", weights_only=True))
+    model.load_state_dict(torch.load(f"{weights_path}/weights.pth"))
     return model
